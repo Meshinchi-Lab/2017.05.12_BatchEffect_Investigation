@@ -1,0 +1,381 @@
+---
+title: "Batch Effect Investigation Validation Cohort"
+author: "Jenny Smith"
+date: "May 12, 2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center')
+knitr::opts_knit$set(root.dir = '~/RNA_seq_Analysis/2017.05.12_BatchEffect_Investigation/')
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(limma)
+library(edgeR)
+library(DESeq2)
+library(dendextend)
+library(pvclust)
+library(NMF)
+getwd()
+```
+
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Limma_DE_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DESEq2_DE_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/clusterAnalysis_Function.r")
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Expression_Distribution_Plots_Function.r")
+```
+
+
+#Define Functions for use
+```{r}
+groups <- function(string){
+  AML <- string %>% grep("^BM", . ,  invert=TRUE, value=TRUE)
+  BM <- grep("^BM",string, value=TRUE)
+  status <- phenoVectors(AML,BM)
+  list <- list(AML,BM,status)
+  names(list) <- c("AML", "BM", "status")
+  return(list)
+}
+```
+
+```{r}
+dn_up_DEGs <- function(df, col, logFC){
+  df <- df[abs(df[,col]) > logFC, ]
+  nUp <- length(which(df[,col] > 0))
+  nDn <- length(which(df[,col] < 0))
+  print(c("Down:", nDn, "Up:", nUp))
+}
+
+dups <- batchInfo$Patient[which(duplicated(batchInfo$Patient))] 
+idx <- which(duplicated(batchInfo$Patient))
+for (i in 1:4){
+  name <- paste(dups[i], ".1", sep="")
+  batchInfo[idx[i], "Patient"] <- name
+}
+rownames(batchInfo) <- batchInfo$Patient
+```
+
+```{r}
+fixDupIDs <- function(df, IDs){
+  dups <- df[,IDs][which(duplicated(df[,IDs]))] 
+  idx <- which(duplicated(df[,IDs]))
+  for (i in 1:length(dups)){
+    name <- paste(dups[i], ".1", sep="")
+    df[idx[i], IDs] <- name
+  }
+  rownames(df) <- df[,IDs]
+  return(df)
+}
+
+```
+
+
+#Read in the Counts
+```{r}
+counts <- get(load("RNAseq_Counts_HD_LD_batchCorrected.RData"))
+
+counts <- counts[2:3]
+names(counts)
+```
+
+```{r}
+sapply(counts,dim)
+```
+
+#Batch Information
+```{r}
+batchInfo <- get(load("ID.Map.withBatchInfo_IDsasRownames_28Apr2016.RData"))
+
+head(batchInfo)
+```
+
+#plate info and Rare fusions data
+```{r}
+plateInfo <- read.csv("Copy of RNA_seq_plate_location_with_fusion_info.csv", stringsAsFactors = FALSE)
+plateInfo <- fixDupIDs(plateInfo, "USI")
+plateInfo$Category.2 <- ifelse(plateInfo$Category.2 == "", "notApplicable", plateInfo$Category.2 )
+plateInfo$Category.1 <- ifelse(plateInfo$Category.1 == "", "notApplicable", plateInfo$Category.1 )
+colnames(plateInfo) <- c("X", "SampleID", "Plate", "USI", "Known.Fusions", "Fusions", "FusionType", "NUP98.NSD1", "Other.NUP.Tx",  "Any.NUP.Tx" ,   "ETS.Variant" ,  "TET2.variant" ,"X.1", "X.2" )
+head(plateInfo[,3:8])
+```
+
+
+#Clinical Data
+
+```{r}
+clinData <- read.csv("New_stratification_outcomes_FORMATTED_updated_2017.03.28.csv", stringsAsFactors = FALSE, row.names = 1)
+
+head(clinData[,1:3])
+```
+
+```{r}
+dim(clinData)
+```
+
+
+#Define the groups
+```{r}
+grps <- lapply(counts, function(x) groups(colnames(x)))
+
+summary(grps)
+```
+
+```{r}
+# save(grps, file="TARGET_AML_AMLandNormalBM_Groups_PhenoVector.RData")
+```
+
+#Perform DE Analysis
+
+```{r}
+DEGs <- list()
+for (i in 1:2){
+  if (i == 1){
+    logCPM = TRUE
+  }else{
+    logCPM = FALSE
+  }
+  DE <- calcDE(counts[[i]], grps[[i]]$AML, grps[[i]]$BM, logCPM = logCPM)
+  DEGs[[names(counts)[i]]] <- DE
+}
+
+summary(DEGs)
+```
+
+
+```{r}
+dim(DEGs$LD$DE)
+dim(DEGs$batchCorrected$DE)
+# write.csv(cts_limma$DE, file="TARGET_AML_AMLvsBM_DEGs.csv")
+```
+
+
+
+#Define the Genes of Interest
+```{r}
+GOI <- list()
+genesUPinAML <- list()
+for ( i in 1:2){
+  genes <- rownames(DEGs[[i]]$DE[abs(DEGs[[i]]$DE$logFC) > 3, ])
+  up <- rownames(DEGs[[i]]$DE[DEGs[[i]]$DE$logFC > 3, ])
+  GOI[[i]] <- genes
+  genesUPinAML[[i]] <- up
+}
+summary(GOI)
+summary(genesUPinAML)
+```
+
+```{r}
+dn_up_DEGs(DEGs$LD$DE, "logFC", 3)
+```
+
+```{r}
+dn_up_DEGs(DEGs$batchCorrected$DE, "logFC", 3)
+```
+
+```{r}
+nanoStringPanel <- read.csv("TARGET_AML_NanostringPanel_SummaryStats_and_geomeanNormalizedCounts.csv", stringsAsFactors = FALSE)$Row.names
+
+nanoStringPanel[1:10]
+```
+
+
+
+#Heirarchal Cluster Analysis
+
+```{r message=FALSE, warning=FALSE}
+names <- c("LD", "batchCorrected")
+dends <- list()
+for (i in 1:2){
+  d <- dge_dendrograms(counts[[i]], grps[[i]]$status, nanoStringPanel, method = "ward.D2")
+  dends[[i]] <- d
+  
+  rdata <- paste(names(counts)[i], "dge_dendrograms_nanoStringPanel.RData", sep="_")s
+  # save(d, file=rdata)
+  
+  colors <- ifelse(grps[[i]]$status == "AML", "purple", "black")
+  
+  # fileName <- paste("TARGET_AML", names[i], "nanoStringPanel_Heatmaps.pdf",sep="_" )
+  # pdf(fileName, height = 11, width=10)
+  basicHeatmap(dends[[i]]$TMMCPM, dends[[i]]$c2, dends[[i]]$c1,colors)
+  # dev.off()
+}
+
+names(dends) <- names
+summary(dends)
+
+```
+
+
+##Annotation Heatmap
+
+```{r}
+#Annotation IDs for clinical characteristics
+cols <- c("Primary.Cytogenetic.Code", "FLT3.ITD.positive.")
+# cols <- c("PrimaryCytogeneticCode", "FLT3.ITDpositive.", "NPMmutation","WT1mutation","c.KitMutationExon8","c.KitMutationExon17", "monosomy7")
+annotationIDs <- list()
+for (i in 1:length(cols)){
+  groupID <- GroupIDs(clinData, cols[i])
+  annotationIDs[[cols[i]]] <- groupID
+}
+
+newCols <- c("Plate", "Fusions", "NUP98.NSD1")
+for (i in 1:length(newCols)){
+  newGroupIDs <- GroupIDs(plateInfo, newCols[i])
+  annotationIDs[[newCols[i]]] <- newGroupIDs
+}
+
+
+sapply(annotationIDs, summary) 
+# length(annotationIDs)
+```
+
+
+```{r}
+order <- c("Primary.Cytogenetic.Code", "Fusions", "FLT3.ITD.positive.", "NUP98.NSD1", "Plate")
+annotationIDs <- annotationIDs[order]
+```
+
+
+```{r message=FALSE, warning=FALSE}
+#conver the IDs to phenoVectors and add the AML_BM status, plus batchInfo
+annos <- lapply(annotationIDs, FUN = phenoVectors_MultipleGroups)
+
+
+status <- list(grps$LD$status, grps$batchCorrected$status)
+batch <- GroupIDs(batchInfo, "batch") %>% phenoVectors_MultipleGroups( . )
+
+```
+
+```{r}
+names <- c("LD", "batchCorrected")
+annosLD_btc <- list(annos, annos)
+names(annosLD_btc) <- names
+
+
+matchAnnos <- list()
+annoDF <- list()
+annoColors <- list()
+
+#for loop to add the AML status, batchinfo, and plateinfo to the clinical annotations
+for (i in 1:2){ 
+  countType <- names[i]
+  
+  annosLD_btc[[i]][["AML_BM"]] <- status[[i]]
+  annosLD_btc[[i]][["batch"]] <- batch
+  
+  matchAnnos[[countType]] <- lapply(annosLD_btc[[i]], matchMatrix, ExpnMatrix=counts[[i]])
+  annoDF[[countType]] <- do.call(cbind, matchAnnos[[countType]])
+  annoColors[[countType]] <- colorCodes_aheatmap(annoDF[[countType]])
+  
+  # fileName <- paste("TARGET_AML",names[i], "nanoStringPanel_annotationHeatmap.pdf", sep="_")
+  pdf(file=fileName, height = 11, width = 10, onefile = FALSE)
+  annotationHeatmap(dends[[i]]$TMMCPM, dends[[i]]$c2, dends[[i]]$c1, annoDF[[i]], annoColors[[i]])
+  # dev.off()
+}
+
+
+```
+
+```{r}
+lapply(annosLD_btc, summary)
+lapply(matchAnnos, summary)
+lapply(annoDF, summary)
+lapply(annoColors, summary)
+```
+
+#MDS
+
+```{r message=FALSE, warning=FALSE}
+units <- c( "Fractional Counts", "Batch Corrected Counts")
+MDS_df <- list()
+plots <- list()
+for (i in 1:2){
+  if (i == 1){
+    logCPM = TRUE
+  }else{
+    logCPM = FALSE
+  }
+  df <- expnDist(counts[[i]], grps[[i]]$status, genesUPinAML[[i]],units[i],logCPM = logCPM)
+  MDS_df[[units[i]]] <- df
+  
+  p <- plotPCoA(df, c(1:ncol(df)-1), "Status")
+  plots[[units[i]]] <- p
+}
+
+summary(MDS_df)
+summary(plots)
+```
+
+```{r}
+
+MDSFrac <- plots$`Fractional Counts`$plot + labs(title="Metric Multidimensional Scaling with TARGET AML\nFractional Counts") + theme(legend.title = element_blank(), text = element_text(size=14)) 
+MDSBtc <- plots$`Batch Corrected Counts`$plot + labs(title="Metric Multidimensional Scaling with TARGET AML\nBatch Corrected Counts") + theme(legend.title = element_blank(), text = element_text(size=14))
+
+
+# pdf(file="TARGET_AML_LDandBtcCorrected_genesUpinAML_metricMDS_plots.pdf")
+MDSFrac
+MDSBtc 
+# dev.off()
+```
+
+### Additional Batch Information
+```{r}
+MDS_batchInfo <- list()
+for (i in 1:2){
+  name <- names(MDS_df)[i]
+  new <- merge( batchInfo, MDS_df[[i]], by.x="Patient", by.y=0)
+  MDS_batchInfo[[name]] <- new
+}
+```
+
+
+#Expression Distribution of Some of the 763 DEGs with FC > |3|
+
+This is the check the output of the genes in the heatmap. The heatmap indicates that there are tons of genes upregulated in normal BM versus 
+```{r}
+chk <- c("TRBC2", "SCUBE1","MNDA","PCDH9", "NEU4", "DNM1","CCNA1")
+
+expnDist(counts$LD, grps$LD$status, chk, "Fractional Counts", logCPM=TRUE, plot=TRUE)
+```
+
+
+
+#PCA Plots 
+
+```{r}
+phenos <- list(grps$LD$status, grps$batchCorrected$status)
+dds <- mapply(DEGs_DESeq, counts, phenos, reference="BM")
+
+summary(dds)
+```
+
+```{r}
+# save(dds, file="TARGET_AML_AMLvsBM_DESEQ2.RData")
+```
+
+
+```{r}
+# pdf(file="TARGET_AML_LD_top500VariedGenes_PCAplots.pdf")
+dds[[3]] + labs(title="PCA with TARGET AML: Fractional Counts") + theme_bw()
+# dev.off()
+
+# pdf(file="TARGET_AML_BatchCorrected_top500VariedGenes_PCAplots.pdf")
+dds[[8]] + labs(title="PCA with TARGET AML: Batch Corrected Counts") + theme_bw()
+# dev.off()
+```
+
+
+
+
